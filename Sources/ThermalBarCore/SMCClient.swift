@@ -203,9 +203,14 @@ public final class SMCClient {
 
         // Firmware applies target values asynchronously. A read-back catches
         // a silently rejected write without treating a transient lag as fatal.
-        if let readBack = try? readNumeric(targetKey), abs(readBack - Double(rpm)) > max(80, Double(rpm) * 0.2) {
-            throw ThermalBarError.writeRejected("fan \(fan.id + 1) did not accept the requested target")
-        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        repeat {
+            if let readBack = try? readNumeric(targetKey), abs(readBack - Double(rpm)) <= 80 {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while ContinuousClock.now < deadline
+        throw ThermalBarError.writeRejected("fan \(fan.id + 1) did not accept the requested target")
     }
 
     /// Verify caller input without changing hardware state.
@@ -379,23 +384,27 @@ public final class SMCClient {
     private func enableManualMode(modeKey: String, fanID: Int) throws {
         do {
             try writeUnsigned(1, key: modeKey)
-            return
+            if try intValue(modeKey) == 1 { return }
         } catch {
-            guard let forceInfo = try? keyInfo("Ftst") else { throw error }
+            guard (try? keyInfo("Ftst")) != nil else { throw error }
+        }
+
+        // A successful write can still be overridden by thermalmonitord.
+        // Confirm the mode byte and request arbitration when necessary.
+        if let forceInfo = try? keyInfo("Ftst") {
             try write("Ftst", bytes: encode(unsigned: 1, size: forceInfo.size))
         }
 
         // Newer Apple Silicon firmware can require thermalmonitord to yield
         // after Ftst is asserted. Keep this bounded and fail closed.
         Thread.sleep(forTimeInterval: 0.35)
-        let deadline = Date().addingTimeInterval(8)
-        while Date() < deadline {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while ContinuousClock.now < deadline {
             do {
                 try writeUnsigned(1, key: modeKey)
-                return
-            } catch {
-                Thread.sleep(forTimeInterval: 0.1)
-            }
+                if try intValue(modeKey) == 1 { return }
+            } catch { /* Retry only during the bounded arbitration window. */ }
+            Thread.sleep(forTimeInterval: 0.1)
         }
         throw ThermalBarError.manualModeTimeout(fanID)
     }

@@ -7,4 +7,4 @@ swift test -c release
 Scripts/build-app.sh
 ```
 
-[Usage and builds](docs/USAGE.md) · [Validation](VALIDATION.md) · [MIT license](LICENSE)
+[Download](https://github.com/adamtash/fantastic-thermal/releases/latest) · [Usage and builds](docs/USAGE.md) · [Validation](VALIDATION.md) · [MIT license](LICENSE)
