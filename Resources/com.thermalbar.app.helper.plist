@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.thermalbar.app.helper</string>
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/ThermalBarHelper</string>
+    <key>UserName</key>
+    <string>root</string>
+	<key>MachServices</key>
+	<dict>
+		<key>com.thermalbar.app.helper</key>
+		<true/>
+	</dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+</dict>
+</plist>

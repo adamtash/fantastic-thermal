@@ -1,0 +1,12 @@
+.build/
+DerivedData/
+build/
+dist/
+*.xcodeproj
+*.xcworkspace
+.DS_Store
+
+# Signing credentials must never enter source control or distribution.
+auth/
+*.p8
+*.p12
