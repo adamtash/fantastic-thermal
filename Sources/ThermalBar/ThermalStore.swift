@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 import ServiceManagement
 import ThermalBarCore
@@ -16,12 +17,13 @@ enum HelperVerificationState: Equatable {
 @Observable
 final class ThermalStore {
     private static let configurationKey = "thermalbar.configuration.v1"
+    private static let configurationRecoveryKey = "thermalbar.configuration.recovery"
     private static let maximumHistoryPointCount = 10_800 // About six hours at two-second samples.
 
     var configuration: ThermalConfiguration {
         didSet {
             guard configuration != oldValue else { return }
-            if mode != configuration.mode { mode = configuration.mode }
+            if mode != editingProfile.mode { mode = editingProfile.mode }
             scheduleConfigurationSave()
             scheduleControl()
         }
@@ -42,6 +44,9 @@ final class ThermalStore {
     private(set) var isPreview: Bool
     private(set) var helperStatus: SMAppService.Status = .notRegistered
     private(set) var helperVerification: HelperVerificationState = .idle
+    private(set) var editingProfileKind: PowerProfileKind = .adapter
+    private(set) var powerSource: PowerSource = .adapter
+    private(set) var hasInternalBattery = false
 
     var isPanelVisible = false
     @ObservationIgnored var onSnapshot: (() -> Void)?
@@ -50,10 +55,15 @@ final class ThermalStore {
     @ObservationIgnored private var controlTask: Task<Void, Never>?
     @ObservationIgnored private var controlPending = false
     @ObservationIgnored private var isStopping = false
+    @ObservationIgnored private var isInteractiveControlEdit = false
     @ObservationIgnored private let hardware = HardwareController()
     private let helperService: SMAppService
     @ObservationIgnored private var triggerEngine = TriggerEngine()
     @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    @ObservationIgnored private var powerMonitor: PowerSourceMonitor?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
+    @ObservationIgnored private var powerSwitchTask: Task<Void, Never>?
+    @ObservationIgnored private var isPowerSwitchPending = false
     private var didAdaptDefaultSensors = false
     @ObservationIgnored private var nextAutomaticHelperCheck = Date.distantPast
     @ObservationIgnored private var nextHelperStatusCheck = Date.distantPast
@@ -65,12 +75,16 @@ final class ThermalStore {
         self.helperService = SMAppService.daemon(plistName: "com.thermalbar.app.helper.plist")
         if preview {
             self.configuration = ThermalConfiguration(
-                mode: .autoPlus,
-                fixedPercent: 42,
-                triggers: [
-                    TriggerRule(sensorKey: "TC0P", sensorName: "CPU proximity", thresholdC: 70, upperTemperatureC: 86, startPercent: 24, targetPercent: 72),
-                    TriggerRule(sensorKey: "TB0T", sensorName: "Battery", thresholdC: 42, upperTemperatureC: 52, startPercent: 18, targetPercent: 56)
-                ],
+                adapterProfile: ControlProfile(
+                    mode: .autoPlus,
+                    fixedPercent: 42,
+                    triggers: [
+                        TriggerRule(sensorKey: "TC0P", sensorName: "CPU proximity", thresholdC: 70, upperTemperatureC: 86, startPercent: 0, targetPercent: 72),
+                        TriggerRule(sensorKey: "TB0T", sensorName: "Battery", thresholdC: 42, upperTemperatureC: 52, startPercent: 18, targetPercent: 56)
+                    ]
+                ),
+                batteryProfile: ControlProfile(mode: .automatic),
+                usesSeparatePowerProfiles: true,
                 selectedSensorKey: "TC0P"
             )
             self.snapshot = Self.previewSnapshot
@@ -83,13 +97,32 @@ final class ThermalStore {
                 targets: [AppliedFanTarget(fanID: 0, targetRPM: 2_340, floorRPM: 1_720)]
             )
             self.helperStatus = .enabled
+            self.hasInternalBattery = true
         } else {
             // Restore the complete profile, including the last control mode.
             // The first monitoring refresh applies it to the detected fans.
             self.configuration = Self.loadConfiguration()
             self.helperStatus = helperService.status
         }
-        self.mode = configuration.mode
+        self.mode = configuration.profile(for: editingProfileKind).mode
+    }
+
+    var editingProfile: ControlProfile {
+        configuration.profile(for: editingProfileKind)
+    }
+
+    var activeProfileKind: PowerProfileKind {
+        configuration.usesSeparatePowerProfiles ? powerSource.profileKind : .adapter
+    }
+
+    var activeProfile: ControlProfile {
+        configuration.profile(for: activeProfileKind)
+    }
+
+    var activeMode: ControlMode { activeProfile.mode }
+
+    var canUseSeparatePowerProfiles: Bool {
+        hasInternalBattery || powerSource == .ups
     }
 
     var primaryTemperature: TemperatureReading? {
@@ -135,12 +168,13 @@ final class ThermalStore {
 
         if let fan = snapshot.fans.first {
             let percent = Int(fan.currentPercent.rounded())
+            let isStopped = fan.currentRPM < max(1, fan.minimumRPM / 2)
             metrics.append(
                 MenuBarMetric(
                     id: "fan-after-battery-\(fan.id)",
-                    title: "F \(percent)%",
+                    title: isStopped ? "F OFF" : "F \(percent)%",
                     menuBarLabel: "FAN",
-                    accessibilityLabel: "Fan, \(percent) percent of range",
+                    accessibilityLabel: isStopped ? "Fan stopped" : "Fan, \(percent) percent of range",
                     symbolName: "fanblades.fill",
                     kind: .fanPercentage
                 )
@@ -177,12 +211,14 @@ final class ThermalStore {
     }
 
     var modeDescription: String {
-        switch configuration.mode {
+        switch activeProfile.mode {
         case .automatic:
-            return "macOS controls the fans"
+            return configuration.usesSeparatePowerProfiles
+                ? "macOS controls the fans on \(powerSource.title.lowercased())"
+                : "macOS controls the fans"
         case .fixed:
-            if !isPreview && !isControlling { return "Target \(Int(configuration.fixedPercent.rounded()))% · waiting for control" }
-            return "Fixed at \(Int(configuration.fixedPercent.rounded()))%"
+            if !isPreview && !isControlling { return "Target \(Int(activeProfile.fixedPercent.rounded()))% · waiting for control" }
+            return "Fixed at \(Int(activeProfile.fixedPercent.rounded()))%"
         case .autoPlus:
             if !isPreview && !isControlling { return "Waiting for fan control" }
             if activeTriggerCount == 0 { return "Auto floor active" }
@@ -191,7 +227,7 @@ final class ThermalStore {
     }
 
     var isControlling: Bool {
-        configuration.mode != .automatic && appliedControl?.mode == configuration.mode && !snapshot.fans.isEmpty
+        activeProfile.mode != .automatic && appliedControl?.mode == activeProfile.mode && !snapshot.fans.isEmpty
     }
 
     var helperIsEnabled: Bool {
@@ -221,12 +257,12 @@ final class ThermalStore {
             "Reinstalling helper…"
         case .verifying:
             "Verifying helper connection…"
-            case .verified:
-                "Helper verified and responding"
-            case .needsApproval:
-                "Approve the helper in System Settings"
-            case .failed(let message):
-                message
+        case .verified:
+            "Helper verified and responding"
+        case .needsApproval:
+            "Approve the helper in System Settings"
+        case .failed(let message):
+            message
         }
     }
 
@@ -265,6 +301,24 @@ final class ThermalStore {
     func startMonitoring() {
         guard !isPreview, monitorTask == nil else { return }
         isStopping = false
+        let monitor = PowerSourceMonitor { [weak self] source in
+            self?.powerSourceChanged(to: source)
+        }
+        powerMonitor = monitor
+        powerSource = monitor.source
+        hasInternalBattery = monitor.hasInternalBattery
+        if !configuration.usesSeparatePowerProfiles {
+            editingProfileKind = .adapter
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.powerMonitor?.refresh()
+            }
+        }
         monitorTask = Task(priority: .utility) { [weak self] in
             await self?.refresh()
             while !Task.isCancelled {
@@ -281,6 +335,14 @@ final class ThermalStore {
         persistConfiguration()
         saveTask?.cancel()
         controlRequestTask?.cancel()
+        powerSwitchTask?.cancel()
+        isPowerSwitchPending = false
+        powerMonitor?.stop()
+        powerMonitor = nil
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+            self.wakeObserver = nil
+        }
         let stoppedTask = monitorTask
         let stoppedControl = controlTask
         stoppedTask?.cancel()
@@ -298,6 +360,11 @@ final class ThermalStore {
         guard !isRefreshing, !isPreview, !isStopping else { return }
         isRefreshing = true
         defer { isRefreshing = false }
+
+        powerMonitor?.refresh()
+        if let powerMonitor {
+            hasInternalBattery = powerMonitor.hasInternalBattery
+        }
 
         do {
             let nextSnapshot = try await hardware.snapshot()
@@ -321,9 +388,42 @@ final class ThermalStore {
         }
     }
 
+    private func powerSourceChanged(to source: PowerSource) {
+        powerSource = source
+        guard configuration.usesSeparatePowerProfiles else { return }
+        isPowerSwitchPending = true
+        powerSwitchTask?.cancel()
+        powerSwitchTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(1500)) } catch { return }
+            guard let self, !Task.isCancelled, self.powerSource == source else { return }
+            self.isPowerSwitchPending = false
+            self.triggerEngine.reset()
+            self.enqueueControl()
+        }
+    }
+
     func setMode(_ mode: ControlMode) {
-        guard configuration.mode != mode else { return }
-        configuration.mode = mode
+        guard editingProfile.mode != mode else { return }
+        updateEditingProfile { $0.mode = mode }
+        triggerEngine.reset()
+        applySoon()
+    }
+
+    func setEditingProfileKind(_ kind: PowerProfileKind) {
+        guard editingProfileKind != kind else { return }
+        editingProfileKind = kind
+        mode = editingProfile.mode
+    }
+
+    func setUsesSeparatePowerProfiles(_ enabled: Bool) {
+        guard configuration.usesSeparatePowerProfiles != enabled else { return }
+        configuration.usesSeparatePowerProfiles = enabled
+        if !enabled {
+            editingProfileKind = .adapter
+            mode = editingProfile.mode
+        }
+        isPowerSwitchPending = false
+        powerSwitchTask?.cancel()
         triggerEngine.reset()
         applySoon()
     }
@@ -388,18 +488,20 @@ final class ThermalStore {
     }
 
     func setFixedPercent(_ percent: Double) {
-        configuration.fixedPercent = min(100, max(0, percent))
+        updateEditingProfile { $0.fixedPercent = min(100, max(0, percent)) }
     }
 
-    func applyCurrentSetting() {
-        applySoon()
+    func setInteractiveControlEdit(_ editing: Bool) {
+        guard isInteractiveControlEdit != editing else { return }
+        isInteractiveControlEdit = editing
+        if !editing { applySoon() }
     }
 
     func applyPreset(_ preset: QuickPreset) {
-        var next = configuration
-        next.mode = .fixed
-        next.fixedPercent = preset.percent
-        configuration = next
+        updateEditingProfile {
+            $0.mode = .fixed
+            $0.fixedPercent = preset.percent
+        }
         triggerEngine.reset()
         applySoon()
     }
@@ -411,7 +513,7 @@ final class ThermalStore {
     }
 
     func addTrigger() {
-        guard configuration.triggers.count < 32 else { return }
+        guard editingProfile.triggers.count < 32 else { return }
         let sensor = snapshot.temperatures.first(where: { $0.kind == .cpu }) ?? snapshot.temperatures.first
         let rule = TriggerRule(
             sensorKey: sensor?.id ?? "TC0P",
@@ -421,11 +523,11 @@ final class ThermalStore {
             startPercent: 20,
             targetPercent: 56
         )
-        configuration.triggers.append(rule)
+        updateEditingProfile { $0.triggers.append(rule) }
     }
 
     func removeTrigger(_ rule: TriggerRule) {
-        configuration.triggers.removeAll { $0.id == rule.id }
+        updateEditingProfile { $0.triggers.removeAll { $0.id == rule.id } }
         triggerDecision = TriggerDecision(
             targetPercent: triggerDecision.targetPercent,
             matchedRuleIDs: triggerDecision.matchedRuleIDs.subtracting([rule.id])
@@ -433,15 +535,26 @@ final class ThermalStore {
     }
 
     func updateTrigger(_ rule: TriggerRule, mutate: (inout TriggerRule) -> Void) {
-        guard let index = configuration.triggers.firstIndex(where: { $0.id == rule.id }) else { return }
-        var updated = configuration.triggers[index]
+        guard let index = editingProfile.triggers.firstIndex(where: { $0.id == rule.id }) else { return }
+        var updated = editingProfile.triggers[index]
         mutate(&updated)
+        let activationChanged = updated.sensorKey != rule.sensorKey
+            || updated.thresholdC != rule.thresholdC
+            || updated.hysteresisC != rule.hysteresisC
+            || updated.isEnabled != rule.isEnabled
         updated.thresholdC = min(105, max(25, updated.thresholdC))
         updated.upperTemperatureC = min(110, max(updated.thresholdC + 1, updated.upperTemperatureC))
-        updated.startPercent = min(100, max(2, updated.startPercent))
+        updated.startPercent = min(100, max(0, updated.startPercent))
         updated.targetPercent = min(100, max(updated.startPercent, updated.targetPercent))
-        configuration.triggers[index] = updated
-        triggerEngine.reset()
+        updateEditingProfile { $0.triggers[index] = updated }
+        if activationChanged { triggerEngine.reset() }
+    }
+
+    private func updateEditingProfile(_ mutate: (inout ControlProfile) -> Void) {
+        var profile = editingProfile
+        mutate(&profile)
+        configuration.setProfile(profile, for: editingProfileKind)
+        mode = profile.mode
     }
 
     func sensor(for rule: TriggerRule) -> TemperatureReading? {
@@ -454,7 +567,7 @@ final class ThermalStore {
     }
 
     private func scheduleControl() {
-        guard !isPreview, !isStopping else { return }
+        guard !isPreview, !isStopping, !isInteractiveControlEdit else { return }
         controlRequestTask?.cancel()
         controlRequestTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
@@ -481,6 +594,7 @@ final class ThermalStore {
         // New settings replace queued work; an in-flight write is followed by
         // the latest setting, so rapid Auto / Fixed toggles cannot race.
         guard helperVerification != .reinstalling else { return }
+        guard !isPowerSwitchPending else { return }
         guard snapshot.isAvailable else {
             await hardware.restoreAll()
             appliedControl = nil
@@ -492,7 +606,8 @@ final class ThermalStore {
             return
         }
         do {
-            if configuration.mode != .automatic {
+            let requested = activeProfile
+            if requested.mode != .automatic {
                 await prepareHelperAutomatically()
                 guard !Task.isCancelled, !isStopping else { return }
                 guard helperStatus == .enabled, helperVerification == .verified else {
@@ -503,10 +618,9 @@ final class ThermalStore {
                 helperVerification = .idle
                 nextAutomaticHelperCheck = .distantPast
             }
-            let requested = configuration
             triggerDecision = triggerEngine.evaluate(rules: requested.triggers, temperatures: snapshot.temperatures)
-            let result = try await hardware.apply(configuration: requested, snapshot: snapshot, decision: triggerDecision)
-            if configuration == requested {
+            let result = try await hardware.apply(profile: requested, snapshot: snapshot, decision: triggerDecision)
+            if activeProfile == requested {
                 appliedControl = result
                 controlError = nil
             } else {
@@ -564,7 +678,7 @@ final class ThermalStore {
     }
 
     private func prepareHelperAutomatically() async {
-        guard configuration.mode != .automatic, helperVerification != .reinstalling else { return }
+        guard activeProfile.mode != .automatic, helperVerification != .reinstalling else { return }
 
         if Date() >= nextHelperStatusCheck {
             updateHelperStatus()
@@ -578,7 +692,7 @@ final class ThermalStore {
     }
 
     private func updateHelperVerificationAutomatically(force: Bool = false) async {
-        guard !isPreview, configuration.mode != .automatic else {
+        guard !isPreview, activeProfile.mode != .automatic else {
             helperVerification = .idle
             return
         }
@@ -633,14 +747,20 @@ final class ThermalStore {
         // Move only the stock CPU rule to the first discovered CPU sensor; a
         // user-created rule keeps its explicit key even when unavailable.
         let availableSensorKeys = Set(snapshot.temperatures.map(\.id))
-        for index in configuration.triggers.indices {
-            let rule = configuration.triggers[index]
-            if rule.sensorKey == "TC0P", !availableSensorKeys.contains(rule.sensorKey), rule.sensorName == "CPU proximity" {
-                var updated = rule
-                updated.sensorKey = firstCPU.id
-                updated.sensorName = firstCPU.name
-                configuration.triggers[index] = updated
+        for kind in PowerProfileKind.allCases {
+            var profile = configuration.profile(for: kind)
+            var changed = false
+            for index in profile.triggers.indices {
+                let rule = profile.triggers[index]
+                if rule.sensorKey == "TC0P", !availableSensorKeys.contains(rule.sensorKey), rule.sensorName == "CPU proximity" {
+                    var updated = rule
+                    updated.sensorKey = firstCPU.id
+                    updated.sensorName = firstCPU.name
+                    profile.triggers[index] = updated
+                    changed = true
+                }
             }
+            if changed { configuration.setProfile(profile, for: kind) }
         }
     }
 
@@ -651,11 +771,17 @@ final class ThermalStore {
     }
 
     private static func loadConfiguration() -> ThermalConfiguration {
-        guard
-            let data = UserDefaults.standard.data(forKey: configurationKey),
-            let stored = try? JSONDecoder().decode(ThermalConfiguration.self, from: data)
-        else { return ThermalConfiguration() }
-        return stored.normalized
+        guard let data = UserDefaults.standard.data(forKey: configurationKey) else {
+            return ThermalConfiguration()
+        }
+        do {
+            return try JSONDecoder().decode(ThermalConfiguration.self, from: data).normalized
+        } catch {
+            // Preserve the original bytes so a future build or support tool can
+            // recover the profile instead of silently destroying it on quit.
+            UserDefaults.standard.set(data, forKey: configurationRecoveryKey)
+            return ThermalConfiguration()
+        }
     }
 
     private static let previewSnapshot = HardwareSnapshot(

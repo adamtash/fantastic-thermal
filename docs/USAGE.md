@@ -9,14 +9,16 @@ Open the app, then click its fan/temperature item in the menu bar. Right-click t
 - **Auto** stops this app's custom control and returns its claimed fans to macOS.
 - **Fixed** requests a percentage of each fan's firmware range. 0% is the firmware minimum, not necessarily a stopped fan.
 - **Auto+** combines linear or parabolic temperature curves with the last observed automatic target as a floor. The strongest rule wins; percentages are not added together. This floor is a historical observation, not a continuously updated macOS thermal recommendation.
+- **Separate power profiles** lets laptops use one Auto, Fixed, or Auto+ configuration on the power adapter and another on battery. A common setup is custom control while plugged in and macOS Auto on battery. Power changes are detected without battery polling, briefly debounced for docks, and rechecked after wake.
+- Trigger fan ranges now start at **0%**. As with Fixed mode, 0% means the fan's firmware-reported minimum RPM; the app never writes a target below that limit.
 - A bounded six-hour history offers 10m, 30m, 1h, 3h, and 6h windows. Each plot preserves short peaks while rendering at most 600 points per series. Changing the primary sensor starts a new history so two sensors are not joined as one line.
 - Fanless and unsupported machines provide monitoring where sensors are available. Missing data is shown as unavailable, never as a fabricated RPM.
 
-The first custom-control request registers a privileged helper. If macOS asks, approve it in System Settings → General → Login Items & Extensions. Older installed helpers may require **Reinstall** once after upgrading to 1.0.1. Monitoring works without helper approval.
+The first custom-control request registers a privileged helper. If macOS asks, approve it in System Settings → General → Login Items & Extensions. Older installed helpers may require **Reinstall** after an upgrade. Monitoring works without helper approval.
 
 ## Performance
 
-Sensor reads run off the main actor every two seconds. Hardware metadata is cached, unrelated SMC keys are skipped during metadata discovery, and numerical readings decode directly from the fixed SMC response buffer. Control requests run separately and serially: rapid edits replace queued settings without delaying sensor updates. Preference writes are debounced and flushed on normal quit.
+Sensor reads run off the main actor every two seconds. Hardware metadata is cached, unrelated SMC keys are skipped during metadata discovery, and numerical readings decode directly from the fixed SMC response buffer. Control requests run separately and serially: rapid edits replace queued settings without delaying sensor updates, and slider drags apply only after the drag ends. Preference writes are debounced and flushed on normal quit. Legacy settings migrate to the adapter profile automatically; undecodable settings are preserved in a recovery copy instead of being silently discarded.
 
 The closed panel has no SwiftUI content tree to redraw. Its menu-bar image only changes when the displayed metric changes; metric cycling uses a single three-second timer. The chart uses Canvas paths with common coordinates for both scales. There are no continuously animated fans, third-party chart dependencies, or bundled Swift runtime copies.
 

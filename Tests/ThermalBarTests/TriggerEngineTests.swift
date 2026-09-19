@@ -203,6 +203,21 @@ final class TriggerEngineTests: XCTestCase {
         XCTAssertEqual(fan.targetRPM(forPercent: 100, floorRPM: 9_000), 5_000)
     }
 
+    func testZeroPercentUsesFirmwareMinimumRatherThanZeroRPM() {
+        let fan = FanReading(
+            id: 0,
+            name: "Fan",
+            currentRPM: 0,
+            targetRPM: 0,
+            minimumRPM: 1_350,
+            maximumRPM: 5_349,
+            mode: .automatic
+        )
+
+        XCTAssertEqual(fan.rpm(forPercent: 0), 1_350)
+        XCTAssertEqual(fan.targetRPM(forPercent: 0), 1_350)
+    }
+
     private func reading(key: String, value: Double) -> TemperatureReading {
         TemperatureReading(id: key, name: key, kind: .other, celsius: value)
     }

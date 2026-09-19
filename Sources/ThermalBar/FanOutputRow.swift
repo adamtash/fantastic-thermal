@@ -38,7 +38,7 @@ struct FanOutputRow: View {
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
                 }
-                Text("\(Int(fan.currentPercent.rounded()))% of range")
+                Text(rangeLabel)
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(fanColor)
@@ -50,10 +50,24 @@ struct FanOutputRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Fan \(fan.id + 1), \(fan.name)")
-        .accessibilityValue("\(fan.currentRPM) RPM, \(Int(fan.currentPercent.rounded())) percent of range")
+        .accessibilityValue(accessibilityValue)
     }
 
     private var fanColor: Color {
         fan.id == 0 ? .blue : .purple
+    }
+
+    private var isStopped: Bool {
+        fan.currentRPM < max(1, fan.minimumRPM / 2)
+    }
+
+    private var rangeLabel: String {
+        isStopped ? "Stopped" : "\(Int(fan.currentPercent.rounded()))% of range"
+    }
+
+    private var accessibilityValue: String {
+        isStopped
+            ? "Stopped, \(fan.currentRPM) RPM"
+            : "\(fan.currentRPM) RPM, \(Int(fan.currentPercent.rounded())) percent of range"
     }
 }

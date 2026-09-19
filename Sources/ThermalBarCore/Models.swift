@@ -15,6 +15,18 @@ public enum ControlMode: String, Codable, CaseIterable, Sendable {
 
 }
 
+public enum PowerProfileKind: String, Codable, CaseIterable, Sendable {
+    case adapter
+    case battery
+
+    public var title: String {
+        switch self {
+        case .adapter: "Power Adapter"
+        case .battery: "Battery"
+        }
+    }
+}
+
 public enum SensorKind: String, Codable, CaseIterable, Sendable {
     case cpu
     case gpu
@@ -109,7 +121,7 @@ public struct FanReading: Identifiable, Codable, Equatable, Sendable {
     }
 
     public func targetRPM(forPercent percent: Double, floorRPM: Int? = nil) -> Int {
-        min(
+        return min(
             maximumRPM,
             max(minimumRPM, max(rpm(forPercent: percent), floorRPM ?? minimumRPM))
         )
@@ -266,22 +278,122 @@ public struct TriggerRule: Identifiable, Codable, Equatable, Sendable {
     ]
 }
 
-public struct ThermalConfiguration: Codable, Equatable, Sendable {
+public struct ControlProfile: Codable, Equatable, Sendable {
     public var mode: ControlMode
     public var fixedPercent: Double
     public var triggers: [TriggerRule]
+
+    public init(
+        mode: ControlMode = .automatic,
+        fixedPercent: Double = 40,
+        triggers: [TriggerRule] = TriggerRule.defaults
+    ) {
+        self.mode = mode
+        self.fixedPercent = fixedPercent
+        self.triggers = triggers
+    }
+}
+
+public struct ThermalConfiguration: Codable, Equatable, Sendable {
+    public var adapterProfile: ControlProfile
+    public var batteryProfile: ControlProfile
+    public var usesSeparatePowerProfiles: Bool
     public var selectedSensorKey: String?
 
+    public init(
+        adapterProfile: ControlProfile,
+        batteryProfile: ControlProfile = ControlProfile(),
+        usesSeparatePowerProfiles: Bool = false,
+        selectedSensorKey: String? = nil
+    ) {
+        self.adapterProfile = adapterProfile
+        self.batteryProfile = batteryProfile
+        self.usesSeparatePowerProfiles = usesSeparatePowerProfiles
+        self.selectedSensorKey = selectedSensorKey
+    }
+
+    /// Source-compatible convenience initializer for callers and profiles
+    /// written before per-power-source settings were introduced.
     public init(
         mode: ControlMode = .automatic,
         fixedPercent: Double = 40,
         triggers: [TriggerRule] = TriggerRule.defaults,
         selectedSensorKey: String? = nil
     ) {
-        self.mode = mode
-        self.fixedPercent = fixedPercent
-        self.triggers = triggers
+        adapterProfile = ControlProfile(
+            mode: mode,
+            fixedPercent: fixedPercent,
+            triggers: triggers
+        )
+        batteryProfile = ControlProfile(mode: .automatic)
+        usesSeparatePowerProfiles = false
         self.selectedSensorKey = selectedSensorKey
+    }
+
+    public func profile(for kind: PowerProfileKind) -> ControlProfile {
+        kind == .adapter ? adapterProfile : batteryProfile
+    }
+
+    public mutating func setProfile(_ profile: ControlProfile, for kind: PowerProfileKind) {
+        switch kind {
+        case .adapter: adapterProfile = profile
+        case .battery: batteryProfile = profile
+        }
+    }
+
+    /// These aliases preserve the original adapter-profile API for probes,
+    /// tests, and older call sites while persisted data uses explicit profiles.
+    public var mode: ControlMode {
+        get { adapterProfile.mode }
+        set { adapterProfile.mode = newValue }
+    }
+
+    public var fixedPercent: Double {
+        get { adapterProfile.fixedPercent }
+        set { adapterProfile.fixedPercent = newValue }
+    }
+
+    public var triggers: [TriggerRule] {
+        get { adapterProfile.triggers }
+        set { adapterProfile.triggers = newValue }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case adapterProfile
+        case batteryProfile
+        case usesSeparatePowerProfiles
+        case selectedSensorKey
+        // Legacy v1 fields.
+        case mode
+        case fixedPercent
+        case triggers
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        selectedSensorKey = try values.decodeIfPresent(String.self, forKey: .selectedSensorKey)
+        usesSeparatePowerProfiles = try values.decodeIfPresent(Bool.self, forKey: .usesSeparatePowerProfiles) ?? false
+
+        if let adapter = try values.decodeIfPresent(ControlProfile.self, forKey: .adapterProfile) {
+            adapterProfile = adapter
+            batteryProfile = try values.decodeIfPresent(ControlProfile.self, forKey: .batteryProfile)
+                ?? ControlProfile(mode: .automatic)
+        } else {
+            adapterProfile = ControlProfile(
+                mode: try values.decodeIfPresent(ControlMode.self, forKey: .mode) ?? .automatic,
+                fixedPercent: try values.decodeIfPresent(Double.self, forKey: .fixedPercent) ?? 40,
+                triggers: try values.decodeIfPresent([TriggerRule].self, forKey: .triggers) ?? TriggerRule.defaults
+            )
+            batteryProfile = ControlProfile(mode: .automatic)
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(adapterProfile, forKey: .adapterProfile)
+        try values.encode(batteryProfile, forKey: .batteryProfile)
+        try values.encode(usesSeparatePowerProfiles, forKey: .usesSeparatePowerProfiles)
+        try values.encodeIfPresent(selectedSensorKey, forKey: .selectedSensorKey)
     }
 }
 
@@ -292,18 +404,24 @@ extension ThermalConfiguration {
         func bounded(_ value: Double, _ range: ClosedRange<Double>, fallback: Double) -> Double {
             value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : fallback
         }
-        result.fixedPercent = bounded(fixedPercent, 0...100, fallback: 40)
-        var seen: Set<UUID> = []
-        result.triggers = triggers.prefix(32).compactMap { source in
-            guard seen.insert(source.id).inserted else { return nil }
-            var rule = source
-            rule.thresholdC = bounded(rule.thresholdC, 25...105, fallback: 70)
-            rule.upperTemperatureC = bounded(rule.upperTemperatureC, (rule.thresholdC + 1)...110, fallback: min(110, rule.thresholdC + 15))
-            rule.startPercent = bounded(rule.startPercent, 2...100, fallback: 20)
-            rule.targetPercent = bounded(rule.targetPercent, rule.startPercent...100, fallback: max(56, rule.startPercent))
-            rule.hysteresisC = bounded(rule.hysteresisC, 0...10, fallback: 2)
-            return rule
+        func normalize(_ profile: ControlProfile) -> ControlProfile {
+            var profile = profile
+            profile.fixedPercent = bounded(profile.fixedPercent, 0...100, fallback: 40)
+            var seen: Set<UUID> = []
+            profile.triggers = profile.triggers.prefix(32).compactMap { source in
+                guard seen.insert(source.id).inserted else { return nil }
+                var rule = source
+                rule.thresholdC = bounded(rule.thresholdC, 25...105, fallback: 70)
+                rule.upperTemperatureC = bounded(rule.upperTemperatureC, (rule.thresholdC + 1)...110, fallback: min(110, rule.thresholdC + 15))
+                rule.startPercent = bounded(rule.startPercent, 0...100, fallback: 20)
+                rule.targetPercent = bounded(rule.targetPercent, rule.startPercent...100, fallback: max(56, rule.startPercent))
+                rule.hysteresisC = bounded(rule.hysteresisC, 0...10, fallback: 2)
+                return rule
+            }
+            return profile
         }
+        result.adapterProfile = normalize(adapterProfile)
+        result.batteryProfile = normalize(batteryProfile)
         return result
     }
 }

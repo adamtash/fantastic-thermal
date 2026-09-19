@@ -170,7 +170,7 @@ final class ProfileValidationTests: XCTestCase {
         XCTAssertEqual(result.triggers.count, 1)
         XCTAssertEqual(result.triggers[0].thresholdC, 105)
         XCTAssertEqual(result.triggers[0].upperTemperatureC, 106)
-        XCTAssertEqual(result.triggers[0].startPercent, 2)
+        XCTAssertEqual(result.triggers[0].startPercent, 0)
         XCTAssertEqual(result.triggers[0].targetPercent, 100)
         XCTAssertEqual(result.triggers[0].hysteresisC, 10)
     }

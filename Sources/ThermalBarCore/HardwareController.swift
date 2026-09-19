@@ -62,14 +62,23 @@ public actor HardwareController {
         snapshot: HardwareSnapshot,
         decision: TriggerDecision
     ) async throws -> AppliedControl {
+        try await apply(profile: configuration.adapterProfile, snapshot: snapshot, decision: decision)
+    }
+
+    public func apply(
+        profile: ControlProfile,
+        snapshot: HardwareSnapshot,
+        decision: TriggerDecision
+    ) async throws -> AppliedControl {
         guard !snapshot.fans.isEmpty else { throw ThermalBarError.noFans }
         var targets: [AppliedFanTarget] = []
 
-        switch configuration.mode {
+        switch profile.mode {
         case .automatic:
             if !appliedTargets.isEmpty {
                 try await releaseManualSession()
                 appliedTargets.removeAll()
+                lastAutoFloorRPM.removeAll()
             }
 
         case .fixed, .autoPlus:
@@ -79,9 +88,9 @@ public actor HardwareController {
             for fan in snapshot.fans {
                 let requestedPercent: Double
                 let floorRPM: Int?
-                switch configuration.mode {
+                switch profile.mode {
                 case .fixed:
-                    requestedPercent = configuration.fixedPercent
+                    requestedPercent = profile.fixedPercent
                     floorRPM = nil
                 case .autoPlus:
                     requestedPercent = decision.targetPercent
@@ -97,7 +106,11 @@ public actor HardwareController {
                     fan.targetRPM.map({ abs($0 - targetRPM) > 80 }) == true {
                     pendingTargets.append(HelperFanTarget(fan: fan, targetRPM: targetRPM))
                 }
-                targets.append(AppliedFanTarget(fanID: fan.id, targetRPM: targetRPM, floorRPM: floorRPM))
+                targets.append(AppliedFanTarget(
+                    fanID: fan.id,
+                    targetRPM: targetRPM,
+                    floorRPM: floorRPM
+                ))
             }
 
             // Keep the watchdog lease alive even when no RPM write is needed.
@@ -107,7 +120,9 @@ public actor HardwareController {
                     let leaseTargets = zip(snapshot.fans, targets).map { fan, target in
                         HelperFanTarget(fan: fan, targetRPM: target.targetRPM)
                     }
-                    try await helperClient?.renewLease(targets: leaseTargets)
+                    if let helperClient {
+                        try await helperClient.renewLease(targets: leaseTargets)
+                    }
                 } else {
                     // Track all attempts so partial failure can be restored.
                     for target in pendingTargets { appliedTargets[target.fan.id] = target.targetRPM }
@@ -125,7 +140,7 @@ public actor HardwareController {
             }
         }
 
-        return AppliedControl(mode: configuration.mode, targets: targets)
+        return AppliedControl(mode: profile.mode, targets: targets)
     }
 
     public func restoreAll() async {

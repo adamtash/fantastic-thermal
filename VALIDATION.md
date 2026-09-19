@@ -1,6 +1,6 @@
 # Release validation
 
-Release: Fantastic Thermal 1.0.1 (2). Measured on 12 September 2026 on an Apple M3 Max running macOS 26.6.2. This is an arm64 build with a macOS 14 deployment target; Intel and older macOS releases have not been validated on hardware.
+Release baseline: Fantastic Thermal 1.0.1 (2). Measured on 12 September 2026 on an Apple M3 Max running macOS 26.6.2. The current 1.1.0 (3) source adds per-power-source profiles and a 0% firmware-minimum curve floor; its automated validation is recorded below. This is an arm64 build with a macOS 14 deployment target; Intel and older macOS releases have not been validated on hardware.
 
 ## Performance and size
 
@@ -20,9 +20,9 @@ The app links only Apple system frameworks and libraries. The former Swift Chart
 
 ## Completed checks
 
-- `swift test -c release`: 22 tests passed, zero failures on the current source.
+- `swift test -c release`: 25 tests passed, zero failures on the current source.
 - Release builds of both app and helper passed. Hardened-runtime Developer ID signatures passed strict, deep verification.
-- Tests cover trigger behavior, configuration persistence/normalization, malformed numeric decoding, chart extrema and slice indices, stable targets, firmware target drift, automatic release, partial failures, restore retries, and ownership-journal recovery.
+- Tests cover trigger behavior, 0%-to-firmware-minimum mapping, legacy and per-power-source configuration persistence/normalization, UPS profile selection, malformed numeric decoding, chart extrema and slice indices, stable targets, firmware target drift, automatic release, partial failures, restore retries, and ownership-journal recovery.
 - All eight embedded icon PNGs decode to identical pixels compared with the original icon. Compression preserves PNG metadata and verifies CRCs and decompressed bytes.
 - Native preview interactions exercised mode selection and slider changes. Slider and chart accessibility descriptions are present. The live history menu opens and dismisses without closing the panel.
 - Production menu-bar artwork was rendered separately for CPU, battery, and the widest fan value (100%). The 34 × 18 pt canvas fits the larger fan and two text rows without changing width between metrics. macOS controls the surrounding status-item spacing.

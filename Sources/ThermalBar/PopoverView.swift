@@ -25,6 +25,9 @@ struct PopoverView: View {
                 VStack(alignment: .leading, spacing: 16) {
 
                     Color.clear.frame(height: 0).id("controls-top")
+                    if store.canUseSeparatePowerProfiles {
+                        PowerProfileCard(store: store)
+                    }
                     ControlSection(store: store)
 
                     FanOutputCard(store: store)
@@ -121,10 +124,56 @@ private struct HeaderView: View {
             Spacer()
 
             StatusPill(
-                title: store.mode.title,
-                color: store.mode == .automatic ? .secondary : .accentColor
+                title: store.activeMode.title,
+                color: store.activeMode == .automatic ? .secondary : .accentColor
             )
         }
+    }
+}
+
+private struct PowerProfileCard: View {
+    let store: ThermalStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: Binding(
+                get: { store.configuration.usesSeparatePowerProfiles },
+                set: { store.setUsesSeparatePowerProfiles($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Separate power profiles")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Use different fan settings on battery and power adapter.")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+
+            if store.configuration.usesSeparatePowerProfiles {
+                Picker("Profile to edit", selection: Binding(
+                    get: { store.editingProfileKind },
+                    set: { store.setEditingProfileKind($0) }
+                )) {
+                    ForEach(PowerProfileKind.allCases, id: \.self) { kind in
+                        Text(kind == .adapter ? "Power Adapter" : "Battery").tag(kind)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                HStack(spacing: 5) {
+                    Image(systemName: store.powerSource == .adapter ? "powerplug.fill" : "battery.75percent")
+                    Text("Currently using \(store.activeProfileKind == .adapter ? "Power Adapter" : "Battery") profile")
+                }
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(13)
+        .background(cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -303,20 +352,20 @@ private struct FixedControlCard: View {
                 Label("Fixed target", systemImage: "slider.horizontal.3")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text("\(Int(store.configuration.fixedPercent.rounded()))%")
+                Text("\(Int(store.editingProfile.fixedPercent.rounded()))%")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(Color.accentColor)
             }
 
             Slider(value: Binding(
-                get: { store.configuration.fixedPercent },
+                get: { store.editingProfile.fixedPercent },
                 set: { store.setFixedPercent($0) }
             ), in: 0...100, step: 1, onEditingChanged: { editing in
-                if !editing { store.applyCurrentSetting() }
+                store.setInteractiveControlEdit(editing)
             })
             .accessibilityLabel("Fixed fan target")
-            .accessibilityValue("\(Int(store.configuration.fixedPercent)) percent of firmware range")
+            .accessibilityValue("\(Int(store.editingProfile.fixedPercent)) percent of firmware range")
 
             HStack(spacing: 7) {
                 ForEach(QuickPreset.allCases, id: \.self) { preset in
@@ -332,7 +381,7 @@ private struct FixedControlCard: View {
     }
 
     private func isSelected(_ preset: QuickPreset) -> Bool {
-        abs(store.configuration.fixedPercent - preset.percent) < 0.1
+        abs(store.editingProfile.fixedPercent - preset.percent) < 0.1
     }
 }
 
@@ -348,7 +397,7 @@ private struct AutoPlusCard: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Auto + triggers")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Never below the last macOS Auto target. Each trigger smoothly ramps fan speed from its start temperature to its upper bound.")
+                    Text("Never below the last macOS Auto target. Each trigger smoothly ramps from the firmware minimum at 0% to its upper target.")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -399,14 +448,14 @@ private struct TriggerList: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
                 .accessibilityLabel("Add temperature trigger")
-                .disabled(store.configuration.triggers.count >= 32)
+                .disabled(store.editingProfile.triggers.count >= 32)
             }
 
-            ForEach(store.configuration.triggers) { rule in
+            ForEach(store.editingProfile.triggers) { rule in
                 TriggerRow(store: store, rule: rule)
             }
 
-            if store.configuration.triggers.isEmpty {
+            if store.editingProfile.triggers.isEmpty {
                 Text("Add a rule to raise fan speed when a sensor gets warm.")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -513,14 +562,18 @@ private struct TriggerRow: View {
                     systemImage: "thermometer.medium",
                     valueText: "\(Int(rule.thresholdC.rounded()))°",
                     value: thresholdBinding,
-                    range: 25...105
+                    range: 25...105,
+                    step: 1,
+                    onEditingChanged: store.setInteractiveControlEdit
                 )
                 CurveControl(
                     title: "Upper temp",
                     systemImage: "thermometer.high",
                     valueText: "\(Int(rule.upperTemperatureC.rounded()))°",
                     value: upperTemperatureBinding,
-                    range: 36...110
+                    range: 36...110,
+                    step: 1,
+                    onEditingChanged: store.setInteractiveControlEdit
                 )
             }
 
@@ -530,14 +583,18 @@ private struct TriggerRow: View {
                     systemImage: "fanblades",
                     valueText: "\(Int(rule.startPercent.rounded()))%",
                     value: startPercentBinding,
-                    range: 2...100
+                    range: 0...100,
+                    step: 2,
+                    onEditingChanged: store.setInteractiveControlEdit
                 )
                 CurveControl(
                     title: "Fan at upper",
                     systemImage: "fanblades.fill",
                     valueText: "\(Int(rule.targetPercent.rounded()))%",
                     value: targetBinding,
-                    range: 2...100
+                    range: 0...100,
+                    step: 2,
+                    onEditingChanged: store.setInteractiveControlEdit
                 )
             }
         }
@@ -607,7 +664,7 @@ private struct TriggerRow: View {
             get: { rule.startPercent },
             set: { value in
                 store.updateTrigger(rule) {
-                    let rounded = min(100, max(2, (value / 2).rounded() * 2))
+                    let rounded = min(100, max(0, (value / 2).rounded() * 2))
                     $0.startPercent = rounded
                     $0.targetPercent = max($0.targetPercent, rounded)
                 }
@@ -620,7 +677,7 @@ private struct TriggerRow: View {
             get: { rule.targetPercent },
             set: { value in
                 store.updateTrigger(rule) {
-                    let rounded = min(100, max(2, (value / 2).rounded() * 2))
+                    let rounded = min(100, max(0, (value / 2).rounded() * 2))
                     $0.targetPercent = rounded
                     $0.startPercent = min($0.startPercent, rounded)
                 }
@@ -635,6 +692,8 @@ private struct CurveControl: View {
     let valueText: String
     @Binding var value: Double
     let range: ClosedRange<Double>
+    let step: Double
+    let onEditingChanged: (Bool) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -651,7 +710,7 @@ private struct CurveControl: View {
                     .font(.system(size: 11, weight: .bold, design: .rounded))
                     .monospacedDigit()
             }
-            Slider(value: $value, in: range, step: title.hasPrefix("Fan") ? 2 : 1)
+            Slider(value: $value, in: range, step: step, onEditingChanged: onEditingChanged)
                 .controlSize(.small)
                 .accessibilityLabel(title)
                 .accessibilityValue(valueText)

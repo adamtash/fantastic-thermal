@@ -15,9 +15,9 @@ final class ConfigurationPersistenceTests: XCTestCase {
             isEnabled: false
         )
         let original = ThermalConfiguration(
-            mode: .autoPlus,
-            fixedPercent: 63,
-            triggers: [rule],
+            adapterProfile: ControlProfile(mode: .autoPlus, fixedPercent: 63, triggers: [rule]),
+            batteryProfile: ControlProfile(mode: .automatic, fixedPercent: 27, triggers: []),
+            usesSeparatePowerProfiles: true,
             selectedSensorKey: "TB0T"
         )
 
@@ -29,6 +29,29 @@ final class ConfigurationPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.fixedPercent, 63)
         XCTAssertEqual(restored.triggers.first?.curve, .parabolic)
         XCTAssertEqual(restored.selectedSensorKey, "TB0T")
+        XCTAssertTrue(restored.usesSeparatePowerProfiles)
+        XCTAssertEqual(restored.batteryProfile.mode, .automatic)
+        XCTAssertEqual(restored.batteryProfile.fixedPercent, 27)
+    }
+
+    func testLegacyConfigurationMigratesToAdapterProfile() throws {
+        let data = Data(
+            #"{"mode":"fixed","fixedPercent":35,"triggers":[],"selectedSensorKey":"TC0P"}"#.utf8
+        )
+
+        let restored = try JSONDecoder().decode(ThermalConfiguration.self, from: data)
+
+        XCTAssertEqual(restored.adapterProfile.mode, .fixed)
+        XCTAssertEqual(restored.adapterProfile.fixedPercent, 35)
+        XCTAssertEqual(restored.batteryProfile.mode, .automatic)
+        XCTAssertFalse(restored.usesSeparatePowerProfiles)
+        XCTAssertEqual(restored.selectedSensorKey, "TC0P")
+    }
+
+    func testPowerSourceMapsUPSOutagesToBatteryProfile() {
+        XCTAssertEqual(PowerSource.adapter.profileKind, .adapter)
+        XCTAssertEqual(PowerSource.battery.profileKind, .battery)
+        XCTAssertEqual(PowerSource.ups.profileKind, .battery)
     }
 
     func testHelperHealthCheckRoundTripsAsANoOpRequest() throws {
