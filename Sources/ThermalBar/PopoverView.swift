@@ -10,8 +10,6 @@ struct PopoverView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HeaderView(store: store)
                 StatusCard(store: store)
-                ModePicker(store: store)
-                ControlFeedback(store: store)
             }
             .padding(.horizontal, 18)
             .padding(.top, 18)
@@ -28,6 +26,8 @@ struct PopoverView: View {
                     if store.canUseSeparatePowerProfiles {
                         PowerProfileCard(store: store)
                     }
+                    ModePicker(store: store)
+                    ControlFeedback(store: store)
                     ControlSection(store: store)
 
                     FanOutputCard(store: store)
