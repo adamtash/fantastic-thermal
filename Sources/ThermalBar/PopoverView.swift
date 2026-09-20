@@ -51,23 +51,6 @@ struct PopoverView: View {
         }
         .frame(width: 382, height: 610)
         .background(.regularMaterial)
-        .task {
-            store.startMonitoring()
-        }
-    }
-}
-
-/// Drop the view tree while hidden: history still collects, but no charts,
-/// labels, or menus are laid out on every background sensor sample.
-struct PopoverRootView: View {
-    let store: ThermalStore
-
-    var body: some View {
-        Group {
-            if store.isPanelVisible { PopoverView(store: store) }
-            else { Color.clear }
-        }
-        .frame(width: 382, height: 610)
     }
 }
 

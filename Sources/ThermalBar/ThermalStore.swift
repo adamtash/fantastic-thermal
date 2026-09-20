@@ -48,7 +48,6 @@ final class ThermalStore {
     private(set) var powerSource: PowerSource = .adapter
     private(set) var hasInternalBattery = false
 
-    var isPanelVisible = false
     @ObservationIgnored var onSnapshot: (() -> Void)?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var controlRequestTask: Task<Void, Never>?
