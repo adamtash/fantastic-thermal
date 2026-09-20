@@ -1,17 +1,12 @@
 import AppKit
-import OSLog
 import SwiftUI
 
 @MainActor
 final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
-    private let store = ThermalStore(preview: CommandLine.arguments.contains("--preview"))
+    private let store = ThermalStore(preview: CommandLine.arguments.contains("--preview") || CommandLine.arguments.contains("--preview-popover"))
     private let popover = NSPopover()
     private let artwork = MenuBarArtwork()
-    private let interactionLogger = Logger(subsystem: "com.thermalbar.app", category: "Interaction")
     private var popoverController: NSHostingController<PopoverView>?
-    private var popoverWindow: NSWindow?
-    private var popoverWindowOffsetFromAnchor: NSPoint?
-    private var isPanelPresented = false
     private var statusItem: NSStatusItem?
     private var contextMenu = NSMenu()
     private var outsideClickMonitor: Any?
@@ -38,7 +33,7 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
 
         store.onSnapshot = { [weak self] in self?.updateStatusItem() }
         store.startMonitoring()
-        if store.isPreview {
+        if CommandLine.arguments.contains("--preview") {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 382, height: 610),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "Fantastic Thermal — Preview"
@@ -51,13 +46,11 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
         }
         updateStatusItem()
         startStatusUpdates()
-        Task { @MainActor [weak self] in
-            for _ in 0..<20 {
-                guard let self else { return }
-                if self.prewarmPopover() {
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(10))
+        if CommandLine.arguments.contains("--preview-popover") {
+            Task { @MainActor [weak self] in
+                // Exercise the actual status-item popover with sample data.
+                try? await Task.sleep(for: .milliseconds(200))
+                self?.showPopover()
             }
         }
     }
@@ -93,9 +86,7 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
         popoverController = controller
         popover.contentViewController = controller
         popover.contentSize = NSSize(width: 382, height: 610)
-        // Keep the native backing window alive for the lifetime of the app.
-        // Dismissal is handled explicitly without destroying that window.
-        popover.behavior = .applicationDefined
+        popover.behavior = .transient
         // A status-item panel should feel attached to the click. AppKit's
         // popover animation adds noticeable latency before the first frame.
         popover.animates = false
@@ -144,37 +135,6 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
         contextMenu.addItem(quitItem)
     }
 
-    @discardableResult
-    private func prewarmPopover() -> Bool {
-        guard popoverWindow == nil else { return true }
-        guard let button = statusItem?.button, button.window != nil else { return false }
-
-        // NSPopover creates its backing window lazily on first presentation.
-        // Create and retain it during launch so every real click uses the
-        // already-built native window.
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        guard let window = popover.contentViewController?.view.window else { return false }
-        window.ignoresMouseEvents = true
-        window.hidesOnDeactivate = false
-        popoverWindow = window
-        let visibleOrigin = window.frame.origin
-        if let anchor = statusItemAnchor(for: button) {
-            popoverWindowOffsetFromAnchor = NSPoint(
-                x: visibleOrigin.x - anchor.x,
-                y: visibleOrigin.y - anchor.y
-            )
-        }
-        // Render at normal opacity because AppKit skips fully transparent
-        // content, but keep the window far outside every display while doing
-        // so. Restore its anchored position only after it is ordered out.
-        window.setFrameOrigin(NSPoint(x: -100_000, y: -100_000))
-        window.displayIfNeeded()
-        window.alphaValue = 0
-        window.orderOut(nil)
-        window.setFrameOrigin(visibleOrigin)
-        return true
-    }
-
     private func installOutsideClickMonitor() {
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]
@@ -183,13 +143,6 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
                 self?.closePopover()
             }
         }
-    }
-
-    private func statusItemAnchor(for button: NSStatusBarButton) -> NSPoint? {
-        guard let window = button.window else { return nil }
-        let buttonRectInWindow = button.convert(button.bounds, to: nil)
-        let buttonRectOnScreen = window.convertToScreen(buttonRectInWindow)
-        return NSPoint(x: buttonRectOnScreen.midX, y: buttonRectOnScreen.minY)
     }
 
     private func startStatusUpdates() {
@@ -263,7 +216,7 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func togglePopover() {
-        if isPanelPresented {
+        if popover.isShown {
             closePopover()
         } else {
             showPopover()
@@ -272,39 +225,19 @@ final class ThermalBarAppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPopover() {
         guard let button = statusItem?.button else { return }
-        guard !isPanelPresented else { return }
-        let startedAt = ProcessInfo.processInfo.systemUptime
-
-        if popoverWindow == nil { prewarmPopover() }
-        guard let window = popoverWindow else { return }
-        if let anchor = statusItemAnchor(for: button),
-           let offset = popoverWindowOffsetFromAnchor {
-            window.setFrameOrigin(NSPoint(x: anchor.x + offset.x, y: anchor.y + offset.y))
-        }
-        window.alphaValue = 1
-        window.ignoresMouseEvents = false
-        window.orderFrontRegardless()
-        window.displayIfNeeded()
-        isPanelPresented = true
-        let elapsedMilliseconds = (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000
-        interactionLogger.debug(
-            "Panel first frame committed in \(elapsedMilliseconds, format: .fixed(precision: 2), privacy: .public) ms"
-        )
-        // Keep activation and keyboard focus off the first-frame path.
-        DispatchQueue.main.async { [weak self, weak window] in
+        guard !popover.isShown else { return }
+        // AppKit owns the popover's backing window, geometry, and lifecycle.
+        // Reusing or moving that private window can leave only its arrow visible.
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.popover.isShown else { return }
             NSApp.activate(ignoringOtherApps: true)
-            if self?.isPanelPresented == true {
-                window?.makeKey()
-            }
+            self.popover.contentViewController?.view.window?.makeKey()
         }
     }
 
     private func closePopover() {
-        guard isPanelPresented, let window = popoverWindow else { return }
-        isPanelPresented = false
-        window.ignoresMouseEvents = true
-        window.alphaValue = 0
-        window.orderOut(nil)
+        popover.performClose(nil)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
