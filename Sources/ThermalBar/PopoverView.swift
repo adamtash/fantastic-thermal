@@ -384,6 +384,9 @@ private struct AutoPlusCard: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    Text("Fast response to heat · 20s cooling hold · gradual slowdown")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
                 }
             }
 

@@ -30,6 +30,8 @@ public actor HardwareController {
     private let helperClient: (any FanControlClient)?
     private var lastAutoFloorRPM: [Int: Int] = [:]
     private var appliedTargets: [Int: Int] = [:]
+    private var response = FanResponseSmoother()
+    private var responseProfile: ControlProfile?
 
     public init(usePrivilegedHelper: Bool = true) {
         helperClient = usePrivilegedHelper ? PrivilegedHelperClient() : nil
@@ -68,10 +70,20 @@ public actor HardwareController {
     public func apply(
         profile: ControlProfile,
         snapshot: HardwareSnapshot,
-        decision: TriggerDecision
+        decision: TriggerDecision,
+        now: TimeInterval = ProcessInfo.processInfo.systemUptime
     ) async throws -> AppliedControl {
         guard !snapshot.fans.isEmpty else { throw ThermalBarError.noFans }
         var targets: [AppliedFanTarget] = []
+        if profile != responseProfile || profile.mode != .autoPlus {
+            response = FanResponseSmoother()
+            responseProfile = profile
+        }
+        // Commit the response state only after the helper accepts the targets.
+        var nextResponse = response
+        let autoPlusPercent = profile.mode == .autoPlus
+            ? nextResponse.target(for: decision.targetPercent, at: now)
+            : decision.targetPercent
 
         switch profile.mode {
         case .automatic:
@@ -93,7 +105,7 @@ public actor HardwareController {
                     requestedPercent = profile.fixedPercent
                     floorRPM = nil
                 case .autoPlus:
-                    requestedPercent = decision.targetPercent
+                    requestedPercent = autoPlusPercent
                     floorRPM = lastAutoFloorRPM[fan.id] ?? fan.minimumRPM
                 case .automatic:
                     requestedPercent = 0
@@ -129,6 +141,8 @@ public actor HardwareController {
                     try await setTargetRPMs(pendingTargets)
                 }
             } catch {
+                response = FanResponseSmoother()
+                responseProfile = nil
                 do {
                     try await releaseManualSession()
                     appliedTargets.removeAll()
@@ -138,12 +152,15 @@ public actor HardwareController {
             for target in pendingTargets {
                 appliedTargets[target.fan.id] = target.targetRPM
             }
+            response = nextResponse
         }
 
         return AppliedControl(mode: profile.mode, targets: targets)
     }
 
     public func restoreAll() async {
+        response = FanResponseSmoother()
+        responseProfile = nil
         guard !appliedTargets.isEmpty else { return }
         do {
             try await releaseManualSession()
@@ -159,6 +176,8 @@ public actor HardwareController {
     /// The app itself normally uses restoreAll(), which only releases fans it
     /// explicitly claimed.
     public func restoreDetectedFans() async -> [String] {
+        response = FanResponseSmoother()
+        responseProfile = nil
         guard let smc = client else { return ["AppleSMC is not connected"] }
         guard let detected = try? smc.snapshot().fans else { return ["Could not read the current fan state"] }
         let fanIDs = Array(Set(appliedTargets.keys).union(

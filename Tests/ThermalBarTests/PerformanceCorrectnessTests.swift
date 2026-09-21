@@ -67,6 +67,71 @@ private actor RecordingFanClient: FanControlClient {
 }
 
 final class HardwareControlTests: XCTestCase, @unchecked Sendable {
+    func testAutoPlusCooldownRenewsLeaseWithoutRepeatingWrites() async throws {
+        let client = RecordingFanClient()
+        let controller = HardwareController(controlClient: client)
+        let profile = ControlProfile(mode: .autoPlus)
+        _ = try await controller.apply(profile: profile, snapshot: snapshot(rpm: 5000),
+            decision: TriggerDecision(targetPercent: 100, matchedRuleIDs: []), now: 0)
+        for second in stride(from: 2, through: 26, by: 2) {
+            let applied = try await controller.apply(profile: profile, snapshot: snapshot(rpm: 5000),
+                decision: TriggerDecision(targetPercent: 0, matchedRuleIDs: []), now: Double(second))
+            XCTAssertEqual(applied.targets.first?.targetRPM, 5000)
+        }
+        let counts = await client.counts()
+        XCTAssertEqual(counts, [1, 13, 0])
+        let cooled = try await controller.apply(profile: profile, snapshot: snapshot(rpm: 5000),
+            decision: TriggerDecision(targetPercent: 0, matchedRuleIDs: []), now: 28)
+        XCTAssertEqual(cooled.targets.first?.targetRPM, 4800)
+    }
+
+    func testFixedModeAndAutoReleaseBypassCoolingHold() async throws {
+        let client = RecordingFanClient()
+        let controller = HardwareController(controlClient: client)
+        _ = try await controller.apply(profile: ControlProfile(mode: .autoPlus), snapshot: snapshot(),
+            decision: TriggerDecision(targetPercent: 100, matchedRuleIDs: []), now: 0)
+        let fixed = try await controller.apply(profile: ControlProfile(mode: .fixed, fixedPercent: 0),
+            snapshot: snapshot(), decision: decision, now: 1)
+        XCTAssertEqual(fixed.targets.first?.targetRPM, 1000)
+        let auto = try await controller.apply(profile: ControlProfile(mode: .automatic),
+            snapshot: snapshot(), decision: decision, now: 2)
+        XCTAssertTrue(auto.targets.isEmpty)
+        let counts = await client.counts()
+        XCTAssertEqual(counts[2], 1)
+    }
+
+    func testProfileChangeAndRecoveryResetCoolingHistory() async throws {
+        let client = RecordingFanClient()
+        let controller = HardwareController(controlClient: client)
+        var profile = ControlProfile(mode: .autoPlus)
+        let high = TriggerDecision(targetPercent: 100, matchedRuleIDs: [])
+        let low = TriggerDecision(targetPercent: 0, matchedRuleIDs: [])
+        _ = try await controller.apply(profile: profile, snapshot: snapshot(), decision: high, now: 0)
+        profile.triggers = []
+        let edited = try await controller.apply(profile: profile, snapshot: snapshot(), decision: low, now: 1)
+        XCTAssertEqual(edited.targets.first?.targetRPM, 1000)
+        _ = try await controller.apply(profile: profile, snapshot: snapshot(), decision: high, now: 2)
+        await controller.restoreAll()
+        let recovered = try await controller.apply(profile: profile, snapshot: snapshot(), decision: low, now: 3)
+        XCTAssertEqual(recovered.targets.first?.targetRPM, 1000)
+    }
+
+    func testFailedAutoPlusWriteDoesNotLeavePhantomHighTarget() async throws {
+        let client = RecordingFanClient()
+        let controller = HardwareController(controlClient: client)
+        let profile = ControlProfile(mode: .autoPlus)
+        await client.failures(write: true)
+        do {
+            _ = try await controller.apply(profile: profile, snapshot: snapshot(),
+                decision: TriggerDecision(targetPercent: 100, matchedRuleIDs: []), now: 0)
+            XCTFail("Expected write failure")
+        } catch {}
+        await client.failures()
+        let recovered = try await controller.apply(profile: profile, snapshot: snapshot(),
+            decision: TriggerDecision(targetPercent: 0, matchedRuleIDs: []), now: 2)
+        XCTAssertEqual(recovered.targets.first?.targetRPM, 1000)
+    }
+
     private let decision = TriggerDecision(targetPercent: 40, matchedRuleIDs: [])
     private func snapshot(mode: FanMode = .manual, rpm: Int = 2600) -> HardwareSnapshot {
         HardwareSnapshot(fans: [FanReading(id: 0, name: "Test fan", currentRPM: rpm, targetRPM: rpm,
